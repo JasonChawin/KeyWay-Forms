@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>模具排产表</title>
+  <!-- 引入 xlsx 库，用于导出 Excel 和 CSV 文件 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- 引入 frappe-gantt 库，用于绘制甘特图 -->
+  <script src="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.css">
+
+  <style>
+    /* 页面整体样式 */
+    body { font-family: sans-serif; margin: 30px; }
+    /* 表格边框和布局 */
+    table, th, td { border: 1px solid black; border-collapse: collapse; padding: 8px; text-align: center; }
+    table { width: 100%; margin-top: 20px; }
+    th { background-color: #e3f2fd; }
+    /* 表单间距 */
+    .form-group { margin: 10px 0; }
+    /* 文字居中 */
+    .center { text-align: center; }
+    /* 按钮样式 */
+    #generate { margin-top: 20px; padding: 10px 16px; font-size: 16px; }
+    #exportButtons { margin-top: 20px; text-align: center; }
+    #exportButtons button { margin: 0 10px; padding: 8px 12px; font-size: 14px; }
+    #undo { padding: 11px 15px; font-size: 14px; margin-right: 10px; }
+    #ganttContainer { margin-top: 40px; }
+    /* 甘特图容器大小 */
+    #ganttChart { width: 100%; height: 400px; }
+  </style>
+</head>
+<body>
+  <h2>模具排产表生成器</h2>
+
+  <!-- 【输入表单模块】 用户填写模具信息、开始日期、加工时间和设备信息 -->
+  <div class="form-group">
+    模具编号：<input type="text" id="moldId">
+    开始作业日期（YYYY-MM-DD）：<input type="date" id="startDate">
+    模具码数：
+    <select id="size">
+      <option>3#</option><option>3.5#</option><option>4#</option>
+      <option>4.5#</option><option>5#</option><option>5.5#</option>
+      <option>6#</option><option>6.5#</option><option>7#</option>
+      <option>7.5#</option><option>8#</option><option>8.5#</option>
+      <option>9#</option><option>9.5#</option><option>10#</option>
+      <option>10.5#</option><option>11#</option><option>11.5#</option>
+      <option>12#</option><option>12.5#</option><option>13#</option>
+      <option>13.5#</option>
+    </select><br><br>
+
+    CNC时间（小时）：<input type="number" id="cncHours">
+    CNC-EDM时间（小时）：<input type="number" id="edmHours"><br><br>
+
+    放电时间（小时）：<input type="number" id="dischargeHours">
+    线割时间（小时）：<input type="number" id="wirecutHours"><br><br>
+
+    设备名&号码：<input type="text" id="machineName">
+  </div>
+
+  <!-- 【操作按钮模块】 包含生成排产表和回撤按钮 -->
+  <div class="center">
+    <button id="undo">回撤</button>
+    <button id="generate">生成排产表</button>
+  </div>
+
+  <!-- 【导出按钮模块】 导出当前排产表为 Excel、CSV、Markdown格式 -->
+  <div id="exportButtons">
+    <button onclick="exportToExcel()">导出为 Excel</button>
+    <button onclick="exportToCSV()">导出为 CSV</button>
+    <button onclick="exportToMarkdown()">导出为 Markdown</button>
+  </div>
+
+  <!-- 【排产表展示模块】 显示当前生成的排产信息 -->
+  <table id="scheduleTable">
+    <thead>
+      <tr>
+        <th>设备名&号码</th>
+        <th>模具编号</th>
+        <th>开始日期</th>
+        <th>模具码数</th>
+        <th>所需天数</th>
+        <th>结束日期</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    // 判断是否为周日，排产时跳过周日（休息日）
+    function isSunday(date) {
+      return date.getDay() === 0;
+    }
+
+    // 格式化日期为 "YYYY-MM-DD" 字符串
+    function formatDate(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    /**
+     * 计算排产结束日期
+     * 输入：开始日期 + 需要的天数（小数，单位为工作日）
+     * 逻辑：每天工作时间为21小时，跳过周日，累积小时直到达到总需求
+     */
+    function addWorkDaysDecimal(startDate, daysDecimal) {
+      const totalHoursNeeded = daysDecimal * 21; // 总工时需求
+      let accumulatedHours = 0;
+      let result = new Date(startDate);
+
+      while (accumulatedHours < totalHoursNeeded) {
+        if (!isSunday(result)) { // 非周日才计工时
+          accumulatedHours += 21;
+        }
+        if (accumulatedHours < totalHoursNeeded) {
+          result.setDate(result.getDate() + 1); // 日期加1天继续累积
+        }
+      }
+
+      return result; // 返回结束日期
+    }
+
+    // 记录已添加的排产行，方便“回撤”操作
+    const previousRows = [];
+    // 记录甘特图任务数据
+    const ganttTasks = [];
+
+    /**
+     * 【生成排产表功能】
+     * 监听生成按钮，读取表单输入：
+     * 计算总工时，转成天数，查询设备最后结束日期，顺延排产，
+     * 更新表格和甘特图，自动调整下一条任务的开始时间（跳过周日）
+     */
+    document.getElementById('generate').addEventListener('click', () => {
+      // 读取输入数据
+      const moldId = document.getElementById('moldId').value;
+      const size = document.getElementById('size').value;
+      const machine = document.getElementById('machineName').value;
+      const userStartDate = new Date(document.getElementById('startDate').value);
+      const tbody = document.querySelector('#scheduleTable tbody');
+
+      // 读取并转换各工序小时数，空值默认0
+      const cnc = Number(document.getElementById('cncHours').value) || 0;
+      const edm = Number(document.getElementById('edmHours').value) || 0;
+      const discharge = Number(document.getElementById('dischargeHours').value) || 0;
+      const wirecut = Number(document.getElementById('wirecutHours').value) || 0;
+
+      // 计算总工时及换算天数（21小时/天）
+      const totalHours = cnc + edm + discharge + wirecut;
+      const daysNeeded = totalHours / 21;
+      const daysDisplay = daysNeeded.toFixed(2);
+
+      // 查询该设备最后一条排产结束时间，保证任务连续排产且不重叠
+      let lastEndDate = null;
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const cells = rows[i].querySelectorAll("td");
+        if (cells[0].textContent === machine) { // 找到设备对应最后一条记录
+          lastEndDate = new Date(cells[5].textContent);
+          lastEndDate.setDate(lastEndDate.getDate() + 1);
+          // 跳过周日
+          while (isSunday(lastEndDate)) {
+            lastEndDate.setDate(lastEndDate.getDate() + 1);
+          }
+          break;
+        }
+      }
+
+      // 确定本条任务开始时间：前序任务后一天或用户输入的开始时间
+      const startDate = lastEndDate || userStartDate;
+      // 计算结束时间
+      const endDate = addWorkDaysDecimal(startDate, daysNeeded);
+      // 格式化日期字符串
+      const formattedStart = formatDate(startDate);
+      const formattedEnd = formatDate(endDate);
+
+      // 新增排产表格行
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${machine}</td>
+        <td>${moldId}</td>
+        <td>${formattedStart}</td>
+        <td>${size}</td>
+        <td>${daysDisplay}</td>
+        <td>${formattedEnd}</td>
+      `;
+      tbody.appendChild(row);
+      previousRows.push(row); // 记录已添加行
+
+      // 添加任务到甘特图数据集
+      ganttTasks.push({
+        id: `${machine}-${moldId}`,
+        name: `${moldId} (${size})`,
+        start: formattedStart,
+        end: formattedEnd,
+        progress: 100,
+        custom_class: 'bar'
+      });
+      renderGanttChart(); // 渲染甘特图
+
+      // 自动设置下一个任务的默认开始时间（结束后第二天，跳过周日）
+      let nextStart = new Date(endDate);
+      do {
+        nextStart.setDate(nextStart.getDate() + 1);
+      } while (isSunday(nextStart));
+      document.getElementById('startDate').value = formatDate(nextStart);
+    });
+
+    /**
+     * 【回撤功能】
+     * 删除最新添加的排产表行和甘特图任务，实现撤销操作
+     */
+    document.getElementById('undo').addEventListener('click', () => {
+      const tbody = document.querySelector('#scheduleTable tbody');
+      const lastRow = previousRows.pop(); // 取出最后一条
+      if (lastRow) {
+        tbody.removeChild(lastRow); // 删除表格行
+        ganttTasks.pop();           // 删除甘特图任务
+        renderGanttChart();         // 重新渲染甘特图
+      }
+    });
+
+    /**
+     * 【导出功能】
+     * 导出当前排产表为 Excel 格式
+     */
+    function exportToExcel() {
+      const table = document.getElementById('scheduleTable');
+      const wb = XLSX.utils.table_to_book(table, {sheet: "排产表"});
+      XLSX.writeFile(wb, '排产表.xlsx');
+    }
+
+    /**
+     * 导出当前排产表为 CSV 格式
+     */
+    function exportToCSV() {
+      const table = document.getElementById('scheduleTable');
+      const ws = XLSX.utils.table_to_sheet(table);
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "排产表.csv";
+      link.click();
+    }
+
+    /**
+     * 导出当前排产表为 Markdown 格式，方便复制到文本编辑器或 Notion
+     */
+    function exportToMarkdown() {
+      const table = document.getElementById('scheduleTable');
+      let md = '| 设备名&号码 | 模具编号 | 开始日期 | 模具码数 | 所需天数 | 结束日期 |\n';
+      md += '|------------|------------|------------|------------|------------|------------|\n';
+      const rows = table.querySelectorAll("tbody tr");
+      rows.forEach(row => {
+        const cells = row.querySelectorAll("td");
+        const line = Array.from(cells).map(cell => cell.textContent.trim()).join(' | ');
+        md += `| ${line} |\n`;
+      });
+      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = '排产表.md';
+      link.click();
+    }
+
+    /**
+     * 【甘特图渲染功能】
+     * 使用 frappe-gantt 库根据当前任务数据绘制甘特图，显示排产进度
+     */
+    function renderGanttChart() {
+      const svg = document.getElementById("ganttChart");
+      svg.innerHTML = ''; // 清空已有内容
+      if (ganttTasks.length > 0) {
+        new Gantt("#ganttChart", ganttTasks, {
+          view_mode: 'Day',
+          date_format: 'YYYY-MM-DD',
+          custom_popup_html: null // 不显示任务详情弹窗
+        });
+      }
+    }
+  </script>
+</body>
+</html>

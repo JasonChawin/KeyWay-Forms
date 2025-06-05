@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>模具排产表</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.css">
+  <style>
+    body { font-family: sans-serif; margin: 30px; background: #f5f7fa; }
+    table, th, td { border: 1px solid black; border-collapse: collapse; padding: 8px; text-align: center; }
+    table { width: 100%; margin-top: 20px; background-color: white; }
+    th { background-color: #e3f2fd; }
+    .form-group { margin: 10px 0; padding: 10px; background: #eef3f8; border-radius: 6px; }
+    .form-group input, .form-group select { margin-left: 8px; margin-bottom: 10px; padding: 4px; }
+    .center { text-align: center; }
+    #generate { margin-top: 20px; padding: 10px 16px; font-size: 16px; }
+    #exportButtons { margin-top: 20px; text-align: center; }
+    #exportButtons button, #undo { margin: 5px 10px; padding: 8px 12px; font-size: 14px; }
+    #ganttContainer { margin-top: 40px; }
+    #ganttChart { width: 100%; height: 400px; }
+  </style>
+</head>
+<body>
+  <h2>模具排产表生成器</h2>
+
+  <div class="form-group">
+    模具编号：<input type="text" id="moldId">
+    开始作业日期（YYYY-MM-DD）：<input type="date" id="startDate">
+    模具码数：
+    <select id="size">
+      <!-- 自动生成选项 -->
+      <script>
+        for (let i = 3; i <= 13.5; i += 0.5) {
+          document.write(`<option>${i}#</option>`);
+        }
+      </script>
+    </select><br>
+    CNC时间（小时）：<input type="number" id="cncHours">
+    CNC-EDM时间（小时）：<input type="number" id="edmHours"><br>
+    放电时间（小时）：<input type="number" id="dischargeHours">
+    线割时间（小时）：<input type="number" id="wirecutHours"><br>
+    设备名&号码：<input type="text" id="machineName">
+  </div>
+
+  <div class="center">
+    <button id="undo">回撤</button>
+    <button id="generate">生成排产表</button>
+  </div>
+
+  <div id="exportButtons">
+    <button onclick="exportToExcel()">导出为 Excel</button>
+    <button onclick="exportToCSV()">导出为 CSV</button>
+    <button onclick="exportToMarkdown()">导出为 Markdown</button>
+  </div>
+
+  <table id="scheduleTable">
+    <thead>
+      <tr>
+        <th>设备名&号码</th>
+        <th>模具编号</th>
+        <th>开始日期</th>
+        <th>模具码数</th>
+        <th>所需天数</th>
+        <th>结束日期</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="ganttContainer">
+    <div id="ganttChart"></div>
+  </div>
+
+  <script>
+    function isSunday(date) {
+      return date.getDay() === 0;
+    }
+
+    function formatDate(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function addWorkDaysDecimal(startDate, daysDecimal) {
+      const totalHoursNeeded = daysDecimal * 21;
+      let accumulatedHours = 0;
+      let result = new Date(startDate);
+      while (accumulatedHours < totalHoursNeeded) {
+        if (!isSunday(result)) accumulatedHours += 21;
+        if (accumulatedHours < totalHoursNeeded) {
+          result.setDate(result.getDate() + 1);
+        }
+      }
+      return result;
+    }
+
+    const previousRows = [];
+    const ganttTasks = [];
+    const colorMap = new Map(); // 设备颜色映射
+
+    // 配色表（基础 HSL 色相）
+    const baseHues = [220, 120, 0]; // 蓝、绿、红
+
+    function getMachineColor(machine) {
+      if (!colorMap.has(machine)) {
+        const index = colorMap.size % baseHues.length;
+        colorMap.set(machine, baseHues[index]);
+      }
+      return colorMap.get(machine);
+    }
+
+    function sizeToSaturation(sizeStr) {
+      const size = parseFloat(sizeStr.replace('#', ''));
+      const min = 3.5, max = 13.5;
+      const ratio = (size - min) / (max - min);
+      return Math.floor(20 + ratio * 60); // 饱和度 20%～80%
+    }
+
+    document.getElementById('generate').addEventListener('click', () => {
+      const moldId = document.getElementById('moldId').value.trim();
+      const size = document.getElementById('size').value;
+      const machine = document.getElementById('machineName').value.trim();
+      const userStartDate = new Date(document.getElementById('startDate').value);
+      const tbody = document.querySelector('#scheduleTable tbody');
+      const cnc = Number(document.getElementById('cncHours').value) || 0;
+      const edm = Number(document.getElementById('edmHours').value) || 0;
+      const discharge = Number(document.getElementById('dischargeHours').value) || 0;
+      const wirecut = Number(document.getElementById('wirecutHours').value) || 0;
+
+      const totalHours = cnc + edm + discharge + wirecut;
+      const daysNeeded = totalHours / 21;
+      const daysDisplay = daysNeeded.toFixed(2);
+
+      let lastEndDate = null;
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const cells = rows[i].querySelectorAll("td");
+        if (cells[0].textContent === machine) {
+          lastEndDate = new Date(cells[5].textContent);
+          lastEndDate.setDate(lastEndDate.getDate() + 1);
+          while (isSunday(lastEndDate)) {
+            lastEndDate.setDate(lastEndDate.getDate() + 1);
+          }
+          break;
+        }
+      }
+
+      // 如果当前输入了新机器名或改了起始日期，则用用户设定的时间作为起点
+      const startDate = lastEndDate && machine === lastMachine ? lastEndDate : userStartDate;
+      const endDate = addWorkDaysDecimal(startDate, daysNeeded);
+      const formattedStart = formatDate(startDate);
+      const formattedEnd = formatDate(endDate);
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${machine}</td>
+        <td>${moldId}</td>
+        <td>${formattedStart}</td>
+        <td>${size}</td>
+        <td>${daysDisplay}</td>
+        <td>${formattedEnd}</td>
+      `;
+
+      // 上色逻辑（颜色映射）
+      const hue = getMachineColor(machine); // 色相
+      const sat = sizeToSaturation(size); // 饱和度
+      row.style.backgroundColor = `hsl(${hue}, ${sat}%, 90%)`;
+
+      tbody.appendChild(row);
+      previousRows.push(row);
+      ganttTasks.push({
+        id: `${machine}-${moldId}`,
+        name: `${moldId} (${size})`,
+        start: formattedStart,
+        end: formattedEnd,
+        progress: 100,
+        custom_class: 'bar'
+      });
+
+      renderGanttChart();
+
+      let nextStart = new Date(endDate);
+      do {
+        nextStart.setDate(nextStart.getDate() + 1);
+      } while (isSunday(nextStart));
+      document.getElementById('startDate').value = formatDate(nextStart);
+
+      lastMachine = machine;
+    });
+
+    let lastMachine = '';
+
+    document.getElementById('undo').addEventListener('click', () => {
+      const tbody = document.querySelector('#scheduleTable tbody');
+      const lastRow = previousRows.pop();
+      if (lastRow) {
+        tbody.removeChild(lastRow);
+        ganttTasks.pop();
+        renderGanttChart();
+      }
+    });
+
+    function exportToExcel() {
+      const table = document.getElementById('scheduleTable');
+      const wb = XLSX.utils.table_to_book(table, {sheet: "排产表"});
+      XLSX.writeFile(wb, '排产表.xlsx');
+    }
+
+    function exportToCSV() {
+      const table = document.getElementById('scheduleTable');
+      const ws = XLSX.utils.table_to_sheet(table);
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "排产表.csv";
+      link.click();
+    }
+
+    function exportToMarkdown() {
+      const table = document.getElementById('scheduleTable');
+      let md = '| 设备名&号码 | 模具编号 | 开始日期 | 模具码数 | 所需天数 | 结束日期 |\n';
+      md += '|------------|------------|------------|------------|------------|------------|\n';
+      const rows = table.querySelectorAll("tbody tr");
+      rows.forEach(row => {
+        const cells = row.querySelectorAll("td");
+        const line = Array.from(cells).map(cell => cell.textContent.trim()).join(' | ');
+        md += `| ${line} |\n`;
+      });
+      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = '排产表.md';
+      link.click();
+    }
+
+    function renderGanttChart() {
+      const svg = document.getElementById("ganttChart");
+      svg.innerHTML = '';
+      if (ganttTasks.length > 0) {
+        new Gantt("#ganttChart", ganttTasks, {
+          view_mode: 'Day',
+          date_format: 'YYYY-MM-DD',
+          custom_popup_html: null
+        });
+      }
+    }
+  </script>
+</body>
+</html>

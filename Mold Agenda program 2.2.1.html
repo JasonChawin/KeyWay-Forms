@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>模具排产表</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 30px; }
+    table, th, td { border: 1px solid black; border-collapse: collapse; padding: 8px; text-align: center; }
+    table { width: 100%; margin-top: 20px; }
+    th { background-color: #e3f2fd; }
+    .form-group { margin: 10px 0; }
+    .center { text-align: center; }
+    #generate { margin-top: 20px; padding: 10px 16px; font-size: 16px; }
+    #exportButtons { margin-top: 20px; text-align: center; }
+    #exportButtons button { margin: 0 10px; padding: 8px 12px; font-size: 14px; }
+    #undo { padding: 11px 15px; font-size: 14px; margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <h2>模具排产表生成器</h2>
+
+  <div class="form-group">
+    模具编号：<input type="text" id="moldId">
+    开始作业日期（YYYY-MM-DD）：<input type="date" id="startDate">
+    模具码数：
+    <select id="size">
+      <option>3#</option><option>3.5#</option><option>4#</option>
+      <option>4.5#</option><option>5#</option><option>5.5#</option>
+      <option>6#</option><option>6.5#</option><option>7#</option>
+      <option>7.5#</option><option>8#</option><option>8.5#</option>
+      <option>9#</option><option>9.5#</option><option>10#</option>
+      <option>10.5#</option><option>11#</option><option>11.5#</option>
+      <option>12#</option><option>12.5#</option><option>13#</option>
+      <option>13.5#</option>
+    </select><br><br>
+
+    CNC时间（小时）：<input type="number" id="cncHours">
+    CNC-EDM时间（小时）：<input type="number" id="edmHours"><br><br>
+
+    放电时间（小时）：<input type="number" id="dischargeHours">
+    线割时间（小时）：<input type="number" id="wirecutHours"><br><br>
+
+    设备名&号码：<input type="text" id="machineName">
+  </div>
+
+  <div class="center">
+    <button id="undo">回撤</button>
+    <button id="generate">生成排产表</button>
+  </div>
+
+  <div id="exportButtons">
+    <button onclick="exportToExcel()">导出为 Excel</button>
+    <button onclick="exportToCSV()">导出为 CSV</button>
+  </div>
+
+  <table id="scheduleTable">
+    <thead>
+      <tr>
+        <th>设备名&号码</th>
+        <th>模具编号</th>
+        <th>开始日期</th>
+        <th>模具码数</th>
+        <th>所需天数</th>
+        <th>结束日期</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    function isSunday(date) {
+      return date.getDay() === 0;
+    }
+
+    function formatDate(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function addWorkDaysDecimal(startDate, daysDecimal) {
+      const totalHoursNeeded = daysDecimal * 21;
+      let accumulatedHours = 0;
+      let result = new Date(startDate);
+
+      while (accumulatedHours < totalHoursNeeded) {
+        if (!isSunday(result)) {
+          accumulatedHours += 21;
+        }
+        if (accumulatedHours < totalHoursNeeded) {
+          result.setDate(result.getDate() + 1);
+        }
+      }
+
+      return result;
+    }
+
+    const previousRows = [];
+
+    document.getElementById('generate').addEventListener('click', () => {
+      const moldId = document.getElementById('moldId').value;
+      const size = document.getElementById('size').value;
+      const machine = document.getElementById('machineName').value;
+
+      const userStartDate = new Date(document.getElementById('startDate').value);
+      const tbody = document.querySelector('#scheduleTable tbody');
+
+      const cnc = Number(document.getElementById('cncHours').value) || 0;
+      const edm = Number(document.getElementById('edmHours').value) || 0;
+      const discharge = Number(document.getElementById('dischargeHours').value) || 0;
+      const wirecut = Number(document.getElementById('wirecutHours').value) || 0;
+
+      const totalHours = cnc + edm + discharge + wirecut;
+      const daysNeeded = totalHours / 21;
+      const daysDisplay = daysNeeded.toFixed(2);
+
+      // 查找设备最后一次排产的结束日期
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+      let lastEndDate = null;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const cells = rows[i].querySelectorAll("td");
+        if (cells[0].textContent === machine) {
+          lastEndDate = new Date(cells[5].textContent);
+          lastEndDate.setDate(lastEndDate.getDate() + 1);
+          while (isSunday(lastEndDate)) {
+            lastEndDate.setDate(lastEndDate.getDate() + 1);
+          }
+          break;
+        }
+      }
+
+      const startDate = lastEndDate || userStartDate;
+      const endDate = addWorkDaysDecimal(startDate, daysNeeded);
+
+      const formattedStart = formatDate(startDate);
+      const formattedEnd = formatDate(endDate);
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${machine}</td>
+        <td>${moldId}</td>
+        <td>${formattedStart}</td>
+        <td>${size}</td>
+        <td>${daysDisplay}</td>
+        <td>${formattedEnd}</td>
+      `;
+
+      tbody.appendChild(row);
+      previousRows.push(row); // 用于回撤记录
+
+      // 自动推进开始日期为下一行开始时间（不修改当前输入）
+      let nextStart = new Date(endDate);
+      do {
+        nextStart.setDate(nextStart.getDate() + 1);
+      } while (isSunday(nextStart));
+      document.getElementById('startDate').value = formatDate(nextStart);
+    });
+
+    // 回撤按钮逻辑
+    document.getElementById('undo').addEventListener('click', () => {
+      const tbody = document.querySelector('#scheduleTable tbody');
+      const lastRow = previousRows.pop();
+      if (lastRow) {
+        tbody.removeChild(lastRow);
+      }
+    });
+
+    function exportToExcel() {
+      const table = document.getElementById('scheduleTable');
+      const wb = XLSX.utils.table_to_book(table, {sheet: "排产表"});
+      XLSX.writeFile(wb, '排产表.xlsx');
+    }
+
+    function exportToCSV() {
+      const table = document.getElementById('scheduleTable');
+      const ws = XLSX.utils.table_to_sheet(table);
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "排产表.csv";
+      link.click();
+    }
+  </script>
+</body>
+</html>

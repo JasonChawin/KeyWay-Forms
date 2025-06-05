@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>模具排产表</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    table, th, td {
+      border: 1px solid black;
+      border-collapse: collapse;
+      text-align: center;
+      padding: 8px;
+    }
+    table {
+      width: 100%;
+      margin-top: 20px;
+    }
+    input, select {
+      margin: 5px;
+    }
+    .form-section {
+      background: #f0f0f0;
+      padding: 10px;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="form-section">
+    <h2>输入变量</h2>
+    <label>模具编号: <input type="text" id="moldId" /></label>
+    <label>开始CNC作业日期: <input type="date" id="startDate" /></label>
+    <label>模具码数: 
+      <select id="moldSize">
+        <option value="">--选择--</option>
+      </select>
+    </label>
+    <label>CNC小时: <input type="number" id="cncHours" /></label>
+    <label>EDM小时: <input type="number" id="edmHours" /></label>
+    <button onclick="generateRow()">生成排产行</button>
+  </div>
+
+  <table id="scheduleTable">
+    <thead>
+      <tr>
+        <th>模具编号</th>
+        <th>模具码数</th>
+        <th>CNC小时</th>
+        <th>EDM小时</th>
+        <th>所需天数</th>
+        <th>CNC机台</th>
+        <th>开始日期</th>
+        <th>结束日期</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const moldSizeOptions = [3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5];
+    const sizeSelect = document.getElementById('moldSize');
+    moldSizeOptions.forEach(size => {
+      let opt = document.createElement('option');
+      opt.value = size;
+      opt.textContent = size + '#';
+      sizeSelect.appendChild(opt);
+    });
+
+    let currentMachine = 1;
+    let lastEndDate = null;
+
+    function generateRow() {
+      const moldId = document.getElementById('moldId').value;
+      const startDateInput = document.getElementById('startDate').value;
+      const size = document.getElementById('moldSize').value;
+      const cncHours = parseFloat(document.getElementById('cncHours').value);
+      const edmHours = parseFloat(document.getElementById('edmHours').value);
+      const totalDays = (cncHours + edmHours) / 21;
+
+      if (!moldId || !startDateInput || !size || isNaN(totalDays)) {
+        alert('请完整填写所有输入项');
+        return;
+      }
+
+      let startDate = lastEndDate ? new Date(lastEndDate) : new Date(startDateInput);
+
+      // 跳过星期天（开始日期）
+      if (startDate.getDay() === 0) startDate.setDate(startDate.getDate() + 1);
+
+      let endDate = new Date(startDate);
+      let addedDays = 0;
+      let daysToAdd = Math.ceil(totalDays);
+
+      while (addedDays < daysToAdd) {
+        endDate.setDate(endDate.getDate() + 1);
+        if (endDate.getDay() !== 0) addedDays++;
+      }
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${moldId}</td>
+        <td>${size}#</td>
+        <td>${cncHours}</td>
+        <td>${edmHours}</td>
+        <td>${totalDays.toFixed(1)}</td>
+        <td>${currentMachine}号机</td>
+        <td>${formatDate(startDate)}</td>
+        <td>${formatDate(endDate)}</td>
+      `;
+
+      document.querySelector('#scheduleTable tbody').appendChild(row);
+
+      currentMachine = currentMachine % 6 + 1;
+      lastEndDate = endDate;
+    }
+
+    function formatDate(d) {
+      return `${String(d.getMonth()+1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+    }
+  </script>
+</body>
+</html>
